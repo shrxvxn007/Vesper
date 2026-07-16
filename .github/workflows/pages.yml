@@ -1,0 +1,76 @@
+name: Pages
+
+# Re-builds and publishes the evaluation notebook HTML to GitHub Pages on
+# every push to main (and on manual dispatch). The deployment is only
+# visible if the repository owner has enabled GitHub Pages for this repo
+# with source = "GitHub Actions" (Settings → Pages → Source).
+#
+# The deployed URL is documented in README.md.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Don't cancel in-progress page builds — we want the most-recent successful
+# deploy to win, but never leave a half-built artefact in flight.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build static HTML from notebook
+        # Re-execute the notebook so the deployed HTML always reflects the
+        # current main branch (the committed docs/evaluation.html is a
+        # fallback for browsing via raw.githubusercontent.com when Pages
+        # is not enabled). Output is a single-file HTML with all PNGs
+        # embedded as base64 — no external assets, no CDN dependencies.
+        run: |
+          mkdir -p docs
+          python main.py --data-dir data
+          jupyter nbconvert --to notebook --execute \
+            notebooks/evaluation.ipynb \
+            --output evaluation.ipynb \
+            --ExecutePreprocessor.timeout=300
+          jupyter nbconvert --to html --output-dir docs --output evaluation.html \
+            notebooks/evaluation.ipynb
+          echo "Built $(wc -c < docs/evaluation.html) bytes"
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload Pages artefact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

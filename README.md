@@ -108,11 +108,30 @@ request. The single CI job:
    `max_gross_weight <= 0.0301` directly from the persisted
    `data/backtest_diagnostics.txt`, so the invariants are enforced even if
    the test fixtures are refactored.
-6. Uploads `backtest_diagnostics.txt` as a build artefact.
+6. Executes `notebooks/evaluation.ipynb` headlessly and uploads the
+   resulting PNGs + `.ipynb` as the `evaluation-notebook` artefact for
+   visual diff review.
+7. Uploads `backtest_diagnostics.txt` as the `backtest-diagnostics`
+   artefact.
 
 The network smoke test (`test_edgar_rate_limit_smoke`) is **not** run by
 CI — opt in locally with `pytest -m network -v` after exporting
 `VESPER_SEC_USER_AGENT`.
+
+## Static HTML export + GitHub Pages
+
+`docs/evaluation.html` is a static export of the notebook with all four
+charts embedded as base64 PNGs. You can browse it:
+
+* directly from the repo: open `docs/evaluation.html` on `github.com`
+  (renders as text in the web UI; download for offline viewing), or
+* live via **GitHub Pages** if Pages is enabled on the repository with
+  source = "GitHub Actions" (Settings → Pages → Source). The Pages site
+  URL will be of the form `https://<owner>.github.io/Vesper/evaluation.html`.
+
+The Pages workflow at `.github/workflows/pages.yml` re-builds and
+re-deploys the HTML on every push to `main`, so the live site always
+reflects the latest committed notebook.
 
 ## License
 
