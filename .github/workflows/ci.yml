@@ -88,6 +88,19 @@ jobs:
           print("All institutional invariants satisfied.")
           PY
 
+      - name: Execute evaluation notebook
+        # Regression-test the notebook end-to-end so a regression in the
+        # visualisation logic (or in any of main.py / the modules it
+        # composes) surfaces in CI rather than during a research run.
+        # ``--inplace`` rewrites the notebook with executed outputs;
+        # ``--ExecutePreprocessor.timeout`` guards against hangs.
+        run: |
+          jupyter nbconvert \
+            --to notebook \
+            --execute notebooks/evaluation.ipynb \
+            --output evaluation.ipynb \
+            --ExecutePreprocessor.timeout=300
+
       - name: Upload backtest diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -96,3 +109,19 @@ jobs:
           path: data/backtest_diagnostics.txt
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Upload notebook + figures
+        # Both the raw PNGs (easy visual diff in the PR Artifacts tab)
+        # and the executed notebook (open it in a local Jupyter to see
+        # all four charts side-by-side). ``if-no-files-found: error`` is
+        # intentional: if the notebook stops producing a chart, we want
+        # CI to scream.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-notebook
+          path: |
+            data/figures/*.png
+            notebooks/evaluation.ipynb
+          if-no-files-found: error
+          retention-days: 14
