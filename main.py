@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,7 +35,8 @@ import pandas as pd
 
 # Project modules
 from data_pipeline.graph_builder import build_supply_chain_graph_from_json
-from data_pipeline.mda_parser import clean_text
+from data_pipeline.mda_parser import clean_text, extract_mda_section
+from data_pipeline.sec_scraper import SECScraper, SECScraperError
 from features.nlp_decay import compute_information_decay
 from features.shock_propagation import propagate_shock_scores
 from alpha_model.cross_sectional_model import AlphaModel, build_training_matrix
@@ -70,6 +72,185 @@ class BacktestResult:
     weights: pd.DataFrame
     weekly_pnl: pd.DataFrame
     diagnostics: dict[str, float]
+
+
+# ---------------------------------------------------------------------------
+# Live-EDGAR plumbing
+# ---------------------------------------------------------------------------
+
+# 10-digit zero-padded SEC CIKs for the 12-ticker universe. These map the
+# synthetic ticker labels to real EDGAR issuers. Confidence: high — these are
+# the standard EDGAR records for the named large-cap tech issuers.
+TICKER_TO_CIK: dict[str, str] = {
+    "AAPL": "0000320193",
+    "MSFT": "0000789019",
+    "NVDA": "0001045810",
+    "AVGO": "0001730168",
+    "ORCL": "0001341439",
+    "CRM":  "0001108524",
+    "ADBE": "0000796343",
+    "GOOGL": "0001652044",
+    "META": "0001326801",
+    "AMZN": "0001018724",
+    "TSLA": "0001318605",
+    "INTC": "0000050863",
+}
+
+PLACEHOLDER_USER_AGENT: str = "Vesper Research research@example.com"
+DEFAULT_USER_AGENT_ENV: str = "VESPER_SEC_USER_AGENT"
+DEFAULT_REAL_EDGAR_CACHE: str = "real_edgar"
+REAL_EDGAR_CACHE_TTL_SECONDS: int = 24 * 60 * 60  # 24 hours
+
+
+def _resolve_user_agent(env_var: str = DEFAULT_USER_AGENT_ENV) -> str:
+    """Return the SEC User-Agent, sourcing it from ``env_var`` if set.
+
+    Args:
+        env_var: Name of the environment variable to read first.
+
+    Returns:
+        User-Agent string. If unset or set to the placeholder, logs a loud
+        warning — SEC's strict fair-access policy will reject placeholder
+        user agents with HTTP 403.
+    """
+    ua = os.environ.get(env_var, "").strip() or PLACEHOLDER_USER_AGENT
+    if ua == PLACEHOLDER_USER_AGENT:
+        logger.warning(
+            "SEC User-Agent is the placeholder %r. Set the %s environment "
+            "variable to a string of the form "
+            "'Company Name AdminContact@<your-domain>' before --real-edgar "
+            "requests will succeed. EDGAR will respond 403 otherwise.",
+            PLACEHOLDER_USER_AGENT,
+            env_var,
+        )
+    return ua
+
+
+def pull_real_filings(
+    scraper: SECScraper,
+    cache_dir: str | Path,
+    *,
+    max_filings_per_ticker: int = 8,
+    cache_ttl_seconds: int = REAL_EDGAR_CACHE_TTL_SECONDS,
+) -> pd.DataFrame:
+    """Pull real EDGAR filings for the 12-ticker universe and cache them.
+
+    This function:
+    1. Reuses ``cache_dir / "filings_metadata.parquet"`` if it exists and
+       its mtime is younger than ``cache_ttl_seconds``.
+    2. Otherwise, fetches metadata from EDGAR for each ticker in
+       :data:`TICKER_TO_CIK` with graceful per-ticker failure.
+    3. Hydrates the MD&A text of any filing whose ``accession_number`` is
+       not already cached at ``cache_dir / "texts" / "<accession>.txt"``.
+
+    Args:
+        scraper: A configured :class:`SECScraper` with ``allow_online=True``.
+        cache_dir: Local cache root (typically ``data/real_edgar``).
+        max_filings_per_ticker: Per-ticker cap on filings to fetch.
+        cache_ttl_seconds: How long the metadata cache is considered fresh.
+
+    Returns:
+        :class:`pandas.DataFrame` with one row per filing. Columns:
+        ``ticker``, ``form_type``, ``release_date``, ``period_end_date``,
+        ``accession_number``, ``url``, ``text_clean``,
+        ``is_synthetic_shock``.
+    """
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    text_dir = cache_dir / "texts"
+    text_dir.mkdir(exist_ok=True)
+    meta_path = cache_dir / "filings_metadata.parquet"
+    meta_tmp = meta_path.with_suffix(meta_path.suffix + ".tmp")
+
+    use_cache = (
+        meta_path.exists()
+        and (pd.Timestamp.now().timestamp() - meta_path.stat().st_mtime) < cache_ttl_seconds
+    )
+
+    if use_cache:
+        logger.info("Loading EDGAR metadata cache from %s", meta_path)
+        meta = pd.read_parquet(meta_path)
+    else:
+        logger.info("Fetching EDGAR metadata for %d tickers", len(TICKER_TO_CIK))
+        meta_frames: list[pd.DataFrame] = []
+        for ticker, cik in TICKER_TO_CIK.items():
+            try:
+                df = scraper.fetch_recent_filings(
+                    cik, form_types=("10-Q", "10-K"), limit=max_filings_per_ticker
+                )
+            except SECScraperError as exc:
+                logger.warning("EDGAR fetch failed for %s (CIK %s): %s", ticker, cik, exc)
+                continue
+            except Exception as exc:  # noqa: BLE001 - last-line defence
+                logger.warning("Unexpected EDGAR error for %s: %s", ticker, exc)
+                continue
+            if df.empty:
+                logger.info("No filings returned for %s (CIK %s)", ticker, cik)
+                continue
+            df = df.reset_index()
+            df["ticker"] = ticker
+            meta_frames.append(df)
+
+        if not meta_frames:
+            meta = pd.DataFrame(
+                columns=[
+                    "ticker", "cik", "form_type", "filing_date",
+                    "period_end_date", "accession_number",
+                    "primary_document", "url",
+                ]
+            )
+        else:
+            meta = pd.concat(meta_frames, ignore_index=True)
+
+        # Atomic write so partial failures don't corrupt the cache.
+        try:
+            meta.to_parquet(meta_tmp)
+            os.replace(meta_tmp, meta_path)
+            logger.info("Wrote EDGAR metadata cache to %s", meta_path)
+        except Exception as exc:  # noqa: BLE001 - last-line defence
+            logger.warning("Failed to persist EDGAR metadata cache: %s", exc)
+            if meta_tmp.exists():
+                try:
+                    meta_tmp.unlink()
+                except OSError:
+                    pass
+
+    # ---- Hydrate per-filing text (cached per-accession) ----
+    texts: list[str] = []
+    for _, row in meta.iterrows():
+        accession = str(row.get("accession_number", ""))
+        if not accession:
+            texts.append("")
+            continue
+        txt_path = text_dir / f"{accession.replace('-', '_')}.txt"
+        if txt_path.exists():
+            texts.append(txt_path.read_text(encoding="utf-8"))
+            continue
+        try:
+            raw_html = scraper.fetch_filing_text(str(row["url"]))
+            mda_text = extract_mda_section(raw_html, form_type=str(row["form_type"]))
+        except SECScraperError as exc:
+            logger.warning(
+                "MD&A hydration failed for %s (%s): %s",
+                accession, row.get("ticker"), exc,
+            )
+            mda_text = ""
+        try:
+            txt_path.write_text(mda_text, encoding="utf-8")
+        except OSError as exc:
+            logger.warning("Could not cache text for %s: %s", accession, exc)
+        texts.append(mda_text)
+
+    meta["text_clean"] = texts
+    meta["is_synthetic_shock"] = False
+
+    # Normalise ``filing_date`` -> ``release_date`` to match the synthetic
+    # filings schema so downstream ``compute_information_decay`` sees the
+    # same column it expects.
+    if "release_date" not in meta.columns and "filing_date" in meta.columns:
+        meta = meta.rename(columns={"filing_date": "release_date"})
+
+    return meta
 
 
 # ---------------------------------------------------------------------------
@@ -214,11 +395,20 @@ def _weekly_nlp_features(
 # ---------------------------------------------------------------------------
 
 
-def run_backtest(data_dir: str | Path = "data") -> BacktestResult:
+def run_backtest(
+    data_dir: str | Path = "data",
+    *,
+    external_filings: pd.DataFrame | None = None,
+) -> BacktestResult:
     """Run the full research backtest against synthetic artefacts.
 
     Args:
         data_dir: Directory holding (or to receive) synthetic artefacts.
+        external_filings: Optional filings frame to use instead of
+            ``data/filings.parquet``. Expected columns when provided:
+            ``ticker``, ``form_type``, ``release_date``, ``period_end_date``,
+            and ``text_clean``. Typically the output of
+            :func:`pull_real_filings`.
 
     Returns:
         :class:`BacktestResult`.
@@ -247,7 +437,15 @@ def run_backtest(data_dir: str | Path = "data") -> BacktestResult:
             columns={weekly_sector_ret_long.columns[0]: "date"}
         )
     weekly_sector_ret = weekly_sector_ret_long.set_index("date").sort_index()
-    filings_raw = pd.read_parquet(data_dir / "filings.parquet")
+    if external_filings is not None and not external_filings.empty:
+        logger.info("Using external_filings (%d rows)", len(external_filings))
+        filings_raw = external_filings.copy()
+        # Defensive column normalisation: callers using ``pull_real_filings``
+        # already produce ``release_date``, but other sources might not.
+        if "release_date" not in filings_raw.columns and "filing_date" in filings_raw.columns:
+            filings_raw = filings_raw.rename(columns={"filing_date": "release_date"})
+    else:
+        filings_raw = pd.read_parquet(data_dir / "filings.parquet")
     graph = build_supply_chain_graph_from_json(data_dir / "supply_chain.json")
 
     # ----- 1. NLP feature: per-filing information decay. -----
@@ -538,12 +736,42 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="data",
         help="Directory holding synthetic artefacts (created if missing).",
     )
+    parser.add_argument(
+        "--real-edgar",
+        action="store_true",
+        help=(
+            "Replace the synthetic filings source with a real pull from SEC "
+            "EDGAR. Requires a compliant User-Agent via "
+            "--user-agent-env or the VESPER_SEC_USER_AGENT env var. "
+            "Filings are cached under <data-dir>/real_edgar/ for 24 hours."
+        ),
+    )
+    parser.add_argument(
+        "--user-agent-env",
+        type=str,
+        default=DEFAULT_USER_AGENT_ENV,
+        help=(
+            "Name of the environment variable holding the SEC User-Agent. "
+            "Defaults to VESPER_SEC_USER_AGENT. The User-Agent must be of "
+            "the form 'Company Name AdminContact@<your-domain>'."
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    result = run_backtest(data_dir=args.data_dir)
+
+    external_filings: pd.DataFrame | None = None
+    if args.real_edgar:
+        user_agent = _resolve_user_agent(env_var=args.user_agent_env)
+        scraper = SECScraper(user_agent=user_agent, allow_online=True)
+        external_filings = pull_real_filings(
+            scraper,
+            cache_dir=Path(args.data_dir) / DEFAULT_REAL_EDGAR_CACHE,
+        )
+
+    result = run_backtest(data_dir=args.data_dir, external_filings=external_filings)
     # Persist a small report next to the data artefacts.
     report_path = Path(args.data_dir) / "backtest_report.csv"
     report_path.parent.mkdir(parents=True, exist_ok=True)
