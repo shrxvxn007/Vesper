@@ -1,5 +1,8 @@
 # Vesper — Alternative Data Information Arbitrage Signal Engine
 
+[![CI](https://github.com/shrxvxn007/Vesper/actions/workflows/ci.yml/badge.svg)](https://github.com/shrxvxn007/Vesper/actions/workflows/ci.yml)
+[![Pages](https://github.com/shrxvxn007/Vesper/actions/workflows/pages.yml/badge.svg)](https://github.com/shrxvxn007/Vesper/actions/workflows/pages.yml)
+
 Vesper is a modular, production-grade Python framework for **mid-frequency
 statistical arbitrage** built around alternative-data signals. It produces a
 weekly cross-sectional alpha score from SEC filings and a synthetic supply-
