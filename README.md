@@ -95,6 +95,25 @@ the synthetic generator and asserts:
 - All PnL numbers are finite
 - No raw returns are used as targets anywhere
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and on every pull
+request. The single CI job:
+
+1. Sets up Python 3.11 with pip caching.
+2. Installs `requirements.txt`.
+3. Runs `pytest tests -v` (the `network` marker is skipped by default).
+4. Runs `python main.py --data-dir data` end-to-end.
+5. Re-asserts `dollar_neutrality_violation < 1e-6` and
+   `max_gross_weight <= 0.0301` directly from the persisted
+   `data/backtest_diagnostics.txt`, so the invariants are enforced even if
+   the test fixtures are refactored.
+6. Uploads `backtest_diagnostics.txt` as a build artefact.
+
+The network smoke test (`test_edgar_rate_limit_smoke`) is **not** run by
+CI — opt in locally with `pytest -m network -v` after exporting
+`VESPER_SEC_USER_AGENT`.
+
 ## License
 
 MIT. See file headers.

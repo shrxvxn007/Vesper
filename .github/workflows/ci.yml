@@ -1,0 +1,98 @@
+name: CI
+
+# Trigger on every push to ``main`` and on every pull request targeting ``main``.
+# The job is deliberately single-process to keep logs readable and to avoid
+# installing cvxpy twice; the integration suite + the end-to-end backtest are
+# fast enough (<90s on a typical runner) that we don't need to parallelise.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Restrict the workflow's token to read-only repository contents; we don't
+# need to push back, comment on PRs, or write artefacts to the repo.
+permissions:
+  contents: read
+
+# Cancel in-progress runs for the same ref when a new commit is pushed.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest + end-to-end backtest invariants
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run unit + integration tests
+        # Default ``addopts`` in pytest.ini keeps the ``network`` marker
+        # skipped, so this run is fully offline.
+        run: python -m pytest tests -v
+
+      - name: Run end-to-end backtest on synthetic data
+        # Exercises the full pipeline (NLP cosine, graph diffusion, rolling
+        # OLS, purged-CV Ridge, sector neutralisation, cvxpy allocator).
+        run: python main.py --data-dir data
+
+      - name: Enforce institutional invariants from diagnostics
+        # The integration tests already assert these on the in-memory
+        # ``BacktestResult``, but we additionally re-check the persisted
+        # diagnostics so a future regression in the test fixtures (e.g.
+        # someone tightening the test tolerance but leaving the script
+        # unchanged) cannot silently pass.
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          diag_path = Path("data/backtest_diagnostics.txt")
+          if not diag_path.exists():
+              sys.exit(f"diagnostics file not found at {diag_path}")
+
+          text = diag_path.read_text(encoding="utf-8")
+
+          # (diagnostic_name, lower_bound, upper_bound)
+          checks = [
+              ("dollar_neutrality_violation", -1e-6, 1e-6),
+              ("max_gross_weight",             0.0,  0.03 + 1e-4),
+              ("avg_weekly_net_pnl",          -1.0,  1.0),  # sanity: must be finite
+          ]
+          for name, lo, hi in checks:
+              match = re.search(rf"^{name} = (-?\d+\.?\d*(?:[eE][-+]?\d+)?)$", text, re.MULTILINE)
+              if match is None:
+                  sys.exit(f"missing diagnostic: {name}")
+              value = float(match.group(1))
+              if not (lo <= value <= hi):
+                  sys.exit(f"INVARIANT VIOLATION: {name}={value} not in [{lo}, {hi}]")
+              print(f"OK  {name} = {value} in [{lo}, {hi}]")
+          print("All institutional invariants satisfied.")
+          PY
+
+      - name: Upload backtest diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-diagnostics
+          path: data/backtest_diagnostics.txt
+          if-no-files-found: ignore
+          retention-days: 7
