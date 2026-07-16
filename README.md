@@ -1,12 +1,21 @@
 # Vesper — Alternative Data Information Arbitrage Signal Engine
 
 [![CI](https://github.com/shrxvxn007/Vesper/actions/workflows/ci.yml/badge.svg)](https://github.com/shrxvxn007/Vesper/actions/workflows/ci.yml)
-[![Pages](https://github.com/shrxvxn007/Vesper/actions/workflows/pages.yml/badge.svg)](https://github.com/shrxvxn007/Vesper/actions/workflows/pages.yml)
 
 Vesper is a modular, production-grade Python framework for **mid-frequency
 statistical arbitrage** built around alternative-data signals. It produces a
 weekly cross-sectional alpha score from SEC filings and a synthetic supply-
 chain graph, then runs an institutional-grade convex portfolio allocator.
+
+> **Note on the Pages badge:** GitHub Pages is not enabled on this repo yet.
+> The `.github/workflows/pages.yml` workflow is gated on
+> `github.event.repository.has_pages` and correctly stays in the
+> `skipped` state until Pages is enabled. The Pages workflow badge is
+> omitted from this README because GitHub caches the badge SVG against
+> the most recent *failed* run (the failures pre-date the `has_pages`
+> gate) and shows "failing" until a *successful* deploy occurs. The
+> badge will be re-added after Pages is enabled (Settings → Pages →
+> Source = "GitHub Actions") and the first successful deploy lands.
 
 ## Features
 
