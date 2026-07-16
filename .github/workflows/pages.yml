@@ -46,22 +46,27 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Build static HTML from notebook
-        # Re-execute the notebook so the deployed HTML always reflects the
-        # current main branch (the committed docs/evaluation.html is a
-        # fallback for browsing via raw.githubusercontent.com when Pages
-        # is not enabled). Output is a single-file HTML with all PNGs
-        # embedded as base64 — no external assets, no CDN dependencies.
+      - name: Build static HTML from notebooks
+        # Re-execute every notebook so the deployed HTML always reflects the
+        # current main branch (the committed docs/*.html are fallbacks for
+        # browsing via raw.githubusercontent.com when Pages is not enabled).
+        # Each output is a single-file HTML with all PNGs embedded as base64
+        # — no external assets, no CDN dependencies.
         run: |
           mkdir -p docs
           python main.py --data-dir data
-          jupyter nbconvert --to notebook --execute \
-            notebooks/evaluation.ipynb \
-            --output evaluation.ipynb \
-            --ExecutePreprocessor.timeout=300
-          jupyter nbconvert --to html --output-dir docs --output evaluation.html \
-            notebooks/evaluation.ipynb
-          echo "Built $(wc -c < docs/evaluation.html) bytes"
+          for nb in notebooks/evaluation.ipynb notebooks/cap_binding_diagnostics.ipynb; do
+            name=$(basename "$nb" .ipynb)
+            echo "--- building $name ---"
+            jupyter nbconvert --to notebook --execute \
+              "$nb" \
+              --output "${name}.ipynb" \
+              --ExecutePreprocessor.timeout=300
+            jupyter nbconvert --to html --output-dir docs --output "${name}.html" \
+              "$nb"
+            echo "  built $(wc -c < docs/${name}.html) bytes"
+          done
+          echo "All notebooks built."
 
       - name: Setup Pages
         uses: actions/configure-pages@v4

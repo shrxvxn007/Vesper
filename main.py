@@ -72,6 +72,10 @@ class BacktestResult:
     weights: pd.DataFrame
     weekly_pnl: pd.DataFrame
     diagnostics: dict[str, float]
+    # Per-(date, ticker) NLP decay + graph shock features actually consumed
+    # by the alpha model. Exposed so downstream notebooks can correlate
+    # signals with weights / PnL without recomputing the pipeline.
+    weekly_features: pd.DataFrame | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -720,7 +724,12 @@ def run_backtest(
     }
     logger.info("Backtest complete: %s", {k: round(v, 6) if isinstance(v, float) else v for k, v in diagnostics.items()})
 
-    return BacktestResult(weights=weights_df, weekly_pnl=pnl_df, diagnostics=diagnostics)
+    return BacktestResult(
+        weights=weights_df,
+        weekly_pnl=pnl_df,
+        diagnostics=diagnostics,
+        weekly_features=weekly_features,
+    )
 
 
 # ---------------------------------------------------------------------------
