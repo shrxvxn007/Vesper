@@ -1,11 +1,15 @@
 name: Pages
 
 # Re-builds and publishes the evaluation notebook HTML to GitHub Pages on
-# every push to main (and on manual dispatch). The deployment is only
-# visible if the repository owner has enabled GitHub Pages for this repo
-# with source = "GitHub Actions" (Settings → Pages → Source).
+# every push to main (and on manual dispatch). The job is gated on
+# ``github.event.repository.has_pages`` so it is a no-op until the repo
+# owner enables Pages — see README.md → "Manual Pages setup".
 #
-# The deployed URL is documented in README.md.
+# Until Pages is enabled, the committed ``docs/evaluation.html`` and
+# ``docs/cap_binding_diagnostics.html`` files are the fallback view.
+# Once Pages is enabled (Settings → Pages → Source = "GitHub Actions"),
+# this workflow takes over and publishes the same content to the live
+# site URL documented in README.md.
 
 on:
   push:
@@ -25,6 +29,12 @@ concurrency:
 
 jobs:
   deploy:
+    # Skip the entire job until Pages is enabled. ``actions/configure-pages``
+    # would otherwise fail with HTTP 404 when no Pages site exists for the
+    # repository. Once the repo owner turns Pages on, the next push will
+    # trigger this job normally.
+    if: github.event.repository.has_pages
+
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

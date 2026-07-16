@@ -120,18 +120,29 @@ CI — opt in locally with `pytest -m network -v` after exporting
 
 ## Static HTML export + GitHub Pages
 
-`docs/evaluation.html` is a static export of the notebook with all four
-charts embedded as base64 PNGs. You can browse it:
+`docs/evaluation.html` and `docs/cap_binding_diagnostics.html` are static
+exports of the two notebooks with all charts embedded as base64 PNGs.
+You can browse them:
 
-* directly from the repo: open `docs/evaluation.html` on `github.com`
+* directly from the repo: open the `docs/*.html` files on `github.com`
   (renders as text in the web UI; download for offline viewing), or
-* live via **GitHub Pages** if Pages is enabled on the repository with
-  source = "GitHub Actions" (Settings → Pages → Source). The Pages site
-  URL will be of the form `https://<owner>.github.io/Vesper/evaluation.html`.
+* live via **GitHub Pages** once Pages is enabled (see below).
 
-The Pages workflow at `.github/workflows/pages.yml` re-builds and
-re-deploys the HTML on every push to `main`, so the live site always
-reflects the latest committed notebook.
+### Manual Pages setup (one-time)
+
+GitHub Pages is **not** enabled by default on this repo. The
+`.github/workflows/pages.yml` workflow is gated on
+`github.event.repository.has_pages` so it stays a no-op until Pages is
+turned on. To enable:
+
+1. Go to **Settings → Pages** for this repository.
+2. Under **Source**, choose **GitHub Actions**.
+3. Click save. The next push to `main` will trigger the Pages workflow.
+
+The live site URL will be of the form
+`https://<owner>.github.io/Vesper/evaluation.html` (plus
+`cap_binding_diagnostics.html`). Until Pages is enabled, the committed
+`docs/*.html` files are the fallback view.
 
 ## License
 
