@@ -6,8 +6,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from features.nlp_decay import compute_information_decay
-from features.shock_propagation import ShockPropagator, propagate_shock_scores
+from vesper.features.nlp_decay import compute_information_decay
+from vesper.features.shock_propagation import ShockPropagator, propagate_shock_scores
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +126,7 @@ def test_shock_propagator_class_matches_function(mini_supply_chain, mini_univers
 def test_propagate_handles_disconnected_nodes(mini_universe: dict[str, str]) -> None:
     """A ticker not part of any edge should still appear in the output with 0."""
     direct = pd.Series(0.0, index=sorted(mini_universe.keys()) + ["ZZZ"])
-    from data_pipeline.graph_builder import build_supply_chain_graph
+    from vesper.data_pipeline.graph_builder import build_supply_chain_graph
 
     g = build_supply_chain_graph(
         [("CCC", "AAA", 0.30)],

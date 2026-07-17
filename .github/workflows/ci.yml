@@ -50,7 +50,9 @@ jobs:
       - name: Run end-to-end backtest on synthetic data
         # Exercises the full pipeline (NLP cosine, graph diffusion, rolling
         # OLS, purged-CV Ridge, sector neutralisation, cvxpy allocator).
-        run: python main.py --data-dir data
+        # ``python -m vesper.main`` adds the repo root to sys.path so the
+        # ``vesper`` namespace package is importable without ``pip install``.
+        run: python -m vesper.main --data-dir data
 
       - name: Enforce institutional invariants from diagnostics
         # The integration tests already assert these on the in-memory

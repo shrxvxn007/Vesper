@@ -20,24 +20,24 @@ chain graph, then runs an institutional-grade convex portfolio allocator.
 ## Features
 
 - **SEC EDGAR ingestion** with a SEC-compliant `User-Agent` (offline by
-  default; see `data_pipeline/sec_scraper.py`).
+  default; see `vesper/data_pipeline/sec_scraper.py`).
 - **MD&A extraction** for 10-Q (Item 2) and 10-K (Item 7) via BeautifulSoup
-  with regex-anchored heading detection (`data_pipeline/mda_parser.py`).
+  with regex-anchored heading detection (`vesper/data_pipeline/mda_parser.py`).
 - **Information-decay factor** computed on top of TF-IDF cosine similarity
-  between consecutive quarterly filings (`features/nlp_decay.py`).
+  between consecutive quarterly filings (`vesper/features/nlp_decay.py`).
 - **Graph shock propagation** — row-normalised 1-step directed diffusion
-  across the customer/supplier graph (`features/shock_propagation.py`).
+  across the customer/supplier graph (`vesper/features/shock_propagation.py`).
 - **Idiosyncratic-return targets** via rolling-window OLS residuals
-  (`alpha_model/target_formulation.py`).
+  (`vesper/alpha_model/target_formulation.py`).
 - **PurgedGroupTimeSeriesSplit** + L2-regularised Ridge for the alpha model
-  (`alpha_model/cross_sectional_model.py`).
+  (`vesper/alpha_model/cross_sectional_model.py`).
 - **Sector factor neutralization** via OLS-residualisation
-  (`portfolio/factor_neutralization.py`).
+  (`vesper/portfolio/factor_neutralization.py`).
 - **Convex allocator** with cvxpy: $-neutral, $-neutral, ±3% per-name caps
-  and linear transaction-cost penalty (`portfolio/convex_optimizer.py`).
+  and linear transaction-cost penalty (`vesper/portfolio/convex_optimizer.py`).
 - **Deterministic synthetic data generator** so the framework runs
   end-to-end out of the box without hitting SEC
-  (`scripts/synthetic_generator.py`).
+  (`vesper/scripts/synthetic_generator.py`).
 - **Unit + integration tests** covering all math invariants
   (`tests/`).
 
@@ -51,7 +51,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 # Run the full backtest end-to-end on synthetic data.
-python main.py --data-dir data
+python -m vesper.main --data-dir data
 
 # Run the test suite.
 pytest tests -v
@@ -65,13 +65,16 @@ so re-runs are byte-stable.
 
 ```
 .
-├── data_pipeline/      # SEC scraper, MD&A parser, supply-chain graph
-├── features/           # NLP cosine decay, graph shock propagation
-├── alpha_model/        # Idiosyncratic targets + purged time-series CV
-├── portfolio/          # Sector neutralization + convex allocator
-├── scripts/            # Synthetic data generator (offline)
+├── vesper/             # top-level namespace package
+│   ├── data_pipeline/  # SEC scraper, MD&A parser, supply-chain graph
+│   ├── features/       # NLP cosine decay, graph shock propagation
+│   ├── alpha_model/    # Idiosyncratic targets + purged time-series CV
+│   ├── portfolio/      # Sector neutralization + convex allocator
+│   ├── scripts/        # Synthetic data generator (offline)
+│   └── main.py         # End-to-end backtest driver
 ├── tests/              # Unit + integration tests
-├── main.py             # End-to-end backtest driver
+├── notebooks/          # Evaluation + cap-binding diagnostics
+├── docs/               # Static HTML exports of the notebooks
 ├── requirements.txt
 ├── pyproject.toml
 └── pytest.ini
@@ -84,8 +87,8 @@ so re-runs are byte-stable.
   `direction="backward"` — strictly no-future information.
 - **Survivorship hooks.** The supply-chain graph carries
   `point_in_time_universe` / `constituents_as_of` metadata and
-  `main.py` filters the tradable universe against that set on every weekly
-  rebalance (replace with a true historical source if you go live).
+  `vesper.main` filters the tradable universe against that set on every
+  weekly rebalance (replace with a true historical source if you go live).
 - **Execution realism.** Hardcoded borrow cost and bid-ask slippage defaults
   live in `TransactionCostConfig` and are applied to PnL via
   `apply_costs_to_pnl` — never silently zero.
@@ -98,7 +101,7 @@ Run the zero-network test suite:
 pytest tests -v
 ```
 
-The integration test (`tests/test_integration.py`) drives `main.py` against
+The integration test (`tests/test_integration.py`) drives `vesper.main` against
 the synthetic generator and asserts:
 
 - `sum(weights) == 0`  (dollar-neutrality, to 1e-6)
@@ -115,7 +118,7 @@ request. The single CI job:
 1. Sets up Python 3.11 with pip caching.
 2. Installs `requirements.txt`.
 3. Runs `pytest tests -v` (the `network` marker is skipped by default).
-4. Runs `python main.py --data-dir data` end-to-end.
+4. Runs `python -m vesper.main --data-dir data` end-to-end.
 5. Re-asserts `dollar_neutrality_violation < 1e-6` and
    `max_gross_weight <= 0.0301` directly from the persisted
    `data/backtest_diagnostics.txt`, so the invariants are enforced even if

@@ -26,7 +26,7 @@ from typing import Final
 import numpy as np
 import pandas as pd
 
-from data_pipeline.graph_builder import build_supply_chain_graph, save_graph_to_json
+from ..data_pipeline.graph_builder import build_supply_chain_graph, save_graph_to_json
 
 # ---------------------------------------------------------------------------
 # Default universe

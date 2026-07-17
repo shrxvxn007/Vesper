@@ -8,16 +8,26 @@ Two responsibilities:
    alpha on contemporaneous residuals — that's the textbook leakage trap.
 
 2. **Model fitting + prediction** (:class:`AlphaModel`): a strictly time-
-   series cross-validated pipeline (``StandardScaler`` → ``Ridge``) with a
-   *purged* gap between folds so that week ``t`` cannot appear in both
-   train and validation sub-splits. We keep the model deliberately simple
-   (linear, regularised) to stay inside the heavily-regularised envelope
-   requested by the spec.
+   series cross-validated model with a *purged* gap between folds so that
+   week ``t`` cannot appear in both train and validation sub-splits. Two
+   backends are available, both behind ``model_type``:
+
+   * ``"ridge"`` (default) builds a ``StandardScaler → Ridge`` pipeline.
+     Linear, heavy L2, fast to fit.
+   * ``"xgboost"`` uses :class:`xgboost.XGBRegressor` with shallow trees
+     (``max_depth=2``) and heavy L2 regularisation (``reg_lambda=10``)
+     plus a mean-zero prior (``base_score=0.0``). No
+     :class:`~sklearn.preprocessing.StandardScaler` (irrelevant for tree
+     models).
+
+   Both live inside the "shallow trees + heavy L2" envelope the spec
+   asked for, and share the prediction contract documented on
+   :meth:`AlphaModel.predict`.
 """
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Final, Literal, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -25,6 +35,66 @@ from sklearn.linear_model import Ridge
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+
+
+# ---------------------------------------------------------------------------
+# XGBoost defaults + pipeline builder
+# ---------------------------------------------------------------------------
+
+# Shallow trees + heavy L2 + mean-zero prior. See :class:`AlphaModel`
+# docstring for the rationale. These are deliberately conservative: the
+# universe is small (~12 cross-section names) and over-parameterised trees
+# will fit noise.
+DEFAULT_XGBOOST_PARAMS: Final[Mapping[str, object]] = {
+    "n_estimators": 200,
+    "learning_rate": 0.05,
+    "max_depth": 2,
+    "reg_lambda": 10.0,    # heavy L2 on leaf weights
+    "reg_alpha": 0.1,      # mild L1 for feature parsimony
+    "min_child_weight": 5,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "tree_method": "hist",
+    "objective": "reg:squarederror",
+    "base_score": 0.0,     # CRITICAL: mean-zero prior so unbiased scores
+}
+
+
+def _build_pipeline(
+    model_type: str,
+    *,
+    ridge_alpha: float,
+    random_state: int,
+    model_params: Mapping[str, object] | None,
+):
+    """Return a sklearn-compatible regressor for the requested backend.
+
+    The returned object must support ``.fit(X, y)`` and ``.predict(X)``
+    over 2-D ``np.ndarray`` inputs (XGBoost and sklearn's ``Pipeline``
+    both do).
+    """
+    if model_type == "ridge":
+        return Pipeline(
+            steps=[
+                ("scaler", StandardScaler()),
+                ("ridge", Ridge(alpha=ridge_alpha, random_state=random_state)),
+            ]
+        )
+
+    # XGBoost branch
+    try:
+        from xgboost import XGBRegressor
+    except ImportError as exc:
+        raise ImportError(
+            "XGBoost is required for model_type='xgboost'. "
+            "Install via `pip install 'xgboost>=2.0'`."
+        ) from exc
+
+    config: dict[str, object] = dict(DEFAULT_XGBOOST_PARAMS)
+    config["random_state"] = random_state
+    if model_params:
+        config.update(model_params)
+    return XGBRegressor(**config)
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +243,13 @@ class AlphaModel:
 
     Args:
         feature_columns: Feature column names consumed by the pipeline.
-        ridge_alpha: L2 regularisation strength for the ridge regressor.
+        model_type: One of ``"ridge"`` (default; StandardScaler + Ridge)
+            or ``"xgboost"`` (shallow trees with heavy L2 regularisation;
+            requires ``xgboost>=2.0``).
+        ridge_alpha: L2 regularisation strength for the ridge regressor
+            (only used when ``model_type="ridge"``).
+        model_params: Optional override dict for the XGBoost keyword
+            arguments. Ignored when ``model_type="ridge"``.
         n_splits: Number of purged time-series CV folds used during fit.
         gap_groups: Purged-split gap between train and validation groups.
         random_state: Reproducibility seed.
@@ -183,17 +259,24 @@ class AlphaModel:
         self,
         *,
         feature_columns: Sequence[str] = ("nlp_decay_score", "graph_shock_score"),
+        model_type: Literal["ridge", "xgboost"] = "ridge",
         ridge_alpha: float = 5.0,
+        model_params: Mapping[str, object] | None = None,
         n_splits: int = 5,
         gap_groups: int = 1,
         random_state: int = 42,
     ) -> None:
+        if model_type not in {"ridge", "xgboost"}:
+            raise ValueError(
+                f"model_type must be one of {{'ridge', 'xgboost'}}; got {model_type!r}"
+            )
         self._feature_columns = tuple(feature_columns)
-        self._pipeline = Pipeline(
-            steps=[
-                ("scaler", StandardScaler()),
-                ("ridge", Ridge(alpha=ridge_alpha, random_state=random_state)),
-            ]
+        self._model_type = model_type
+        self._pipeline = _build_pipeline(
+            model_type=model_type,
+            ridge_alpha=ridge_alpha,
+            random_state=random_state,
+            model_params=model_params,
         )
         self._splitter = PurgedGroupTimeSeriesSplit(n_splits=n_splits, gap_groups=gap_groups)
         self._random_state = random_state
@@ -206,6 +289,11 @@ class AlphaModel:
     @property
     def feature_columns(self) -> tuple[str, ...]:
         return self._feature_columns
+
+    @property
+    def model_type(self) -> str:
+        """Return the active backend (one of ``"ridge"``, ``"xgboost"``)."""
+        return self._model_type
 
     def fit(self, training_df: pd.DataFrame, *, date_column: str = "date") -> "AlphaModel":
         """Fit the pipeline using purged-group time-series CV.
@@ -269,4 +357,5 @@ __all__ = [
     "PurgedGroupTimeSeriesSplit",
     "build_training_matrix",
     "AlphaModel",
+    "DEFAULT_XGBOOST_PARAMS",
 ]

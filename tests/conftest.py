@@ -10,9 +10,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from data_pipeline.graph_builder import build_supply_chain_graph
-from features.nlp_decay import compute_information_decay
-from features.shock_propagation import propagate_shock_scores
+from vesper.data_pipeline.graph_builder import build_supply_chain_graph
+from vesper.features.nlp_decay import compute_information_decay
+from vesper.features.shock_propagation import propagate_shock_scores
 
 
 # ---------------------------------------------------------------------------

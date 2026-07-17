@@ -32,7 +32,7 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 
-from data_pipeline.graph_builder import adjacency_matrix
+from ..data_pipeline.graph_builder import adjacency_matrix
 
 
 # ---------------------------------------------------------------------------

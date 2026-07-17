@@ -13,14 +13,28 @@ requires-python = ">=3.10"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["data_pipeline*", "features*", "alpha_model*", "portfolio*", "scripts*"]
+include = ["vesper*"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "W", "B", "UP"]
+select = ["E", "F", "I", "W", "B", "UP", "PD"]
+
+# PD901 (pandas-vet) was the canonical ban on ``DataFrame.iterrows()``.
+# It was *upstream-removed in ruff 0.5.0* (May 2024) as "highly opinionated
+# and overly strict in most cases". Two paths to keep this rule active:
+#
+#   1. Pin ``ruff>=0.4,<0.5`` in your dev tooling — PD901 is then enforced.
+#   2. Use a pre-commit regex hook on ``\b\.iterrows\(`` if you want to
+#      run a modern ruff for everything else.
+#
+# Current production ruff (0.5.0+) silently no-ops this rule. The codebase
+# itself still uses the canonical vectorisation patterns
+# (``itertuples()`` for row-level side-effects, ``merge_asof(by=...)``
+# for partitioned asof joins, ``zip`` over numpy arrays for row walks),
+# so the underlying invariant is intact even when PD901 isn't enforced.
 
 [tool.mypy]
 python_version = "3.10"

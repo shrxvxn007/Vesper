@@ -1,6 +1,6 @@
 """scripts: synthetic data generators and CLI entry points."""
 
-from scripts.synthetic_generator import (
+from .synthetic_generator import (
     SyntheticGenerator,
     generate_synthetic_dataset,
 )

@@ -6,13 +6,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from portfolio.convex_optimizer import (
+from vesper.portfolio.convex_optimizer import (
     ConvexPortfolioOptimizer,
     PortfolioConstraints,
     TransactionCostConfig,
     build_alpha_layer,
 )
-from portfolio.factor_neutralization import neutralize_to_sectors
+from vesper.portfolio.factor_neutralization import neutralize_to_sectors
 
 
 def _balanced_layer(n: int) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.DataFrame]:

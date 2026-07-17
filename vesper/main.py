@@ -13,7 +13,7 @@ Pipeline:
 
 Run with::
 
-    python main.py --data-dir data
+    python -m vesper.main --data-dir data
 
 This script is deliberately *self-contained*: it does not need internet
 access. The synthetic data generator produces the same artefacts every
@@ -34,21 +34,21 @@ import numpy as np
 import pandas as pd
 
 # Project modules
-from data_pipeline.graph_builder import build_supply_chain_graph_from_json
-from data_pipeline.mda_parser import clean_text, extract_mda_section
-from data_pipeline.sec_scraper import SECScraper, SECScraperError
-from features.nlp_decay import compute_information_decay
-from features.shock_propagation import propagate_shock_scores
-from alpha_model.cross_sectional_model import AlphaModel, build_training_matrix
-from alpha_model.target_formulation import compute_residual_returns_rolling
-from portfolio.convex_optimizer import (
+from vesper.data_pipeline.graph_builder import build_supply_chain_graph_from_json
+from vesper.data_pipeline.mda_parser import clean_text, extract_mda_section
+from vesper.data_pipeline.sec_scraper import SECScraper, SECScraperError
+from vesper.features.nlp_decay import compute_information_decay
+from vesper.features.shock_propagation import propagate_shock_scores
+from vesper.alpha_model.cross_sectional_model import AlphaModel, build_training_matrix
+from vesper.alpha_model.target_formulation import compute_residual_returns_rolling
+from vesper.portfolio.convex_optimizer import (
     ConvexPortfolioOptimizer,
     PortfolioConstraints,
     TransactionCostConfig,
     build_alpha_layer,
 )
-from portfolio.factor_neutralization import neutralize_to_sectors
-from scripts.synthetic_generator import generate_synthetic_dataset
+from vesper.portfolio.factor_neutralization import neutralize_to_sectors
+from vesper.scripts.synthetic_generator import generate_synthetic_dataset
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -220,30 +220,13 @@ def pull_real_filings(
                     pass
 
     # ---- Hydrate per-filing text (cached per-accession) ----
-    texts: list[str] = []
-    for _, row in meta.iterrows():
-        accession = str(row.get("accession_number", ""))
-        if not accession:
-            texts.append("")
-            continue
-        txt_path = text_dir / f"{accession.replace('-', '_')}.txt"
-        if txt_path.exists():
-            texts.append(txt_path.read_text(encoding="utf-8"))
-            continue
-        try:
-            raw_html = scraper.fetch_filing_text(str(row["url"]))
-            mda_text = extract_mda_section(raw_html, form_type=str(row["form_type"]))
-        except SECScraperError as exc:
-            logger.warning(
-                "MD&A hydration failed for %s (%s): %s",
-                accession, row.get("ticker"), exc,
-            )
-            mda_text = ""
-        try:
-            txt_path.write_text(mda_text, encoding="utf-8")
-        except OSError as exc:
-            logger.warning("Could not cache text for %s: %s", accession, exc)
-        texts.append(mda_text)
+    # ``itertuples()`` is the project-approved alternative to ``iterrows()``
+    # for row-level side-effect loops (faster, no per-row Series wrapping).
+    texts: list[str] = [
+        _hydrate_one_filing(row, scraper, text_dir) for row in meta.itertuples()
+    ] if len(meta) > 0 else []
+    # ``texts`` stays aligned with ``meta`` even when ``meta`` is empty
+    # (the early empty-cache branch above sets columns with no rows).
 
     meta["text_clean"] = texts
     meta["is_synthetic_shock"] = False
@@ -350,14 +333,18 @@ def _weekly_nlp_features(
                 f"{sorted(missing_weekly)}; have {list(weekly_clean.columns)}"
             )
 
-    # Sort NLP data (merge_asof requires sorted right key).
+    # Sort NLP data (merge_asof requires the on-key column to be globally
+    # monotonic. With ``by=ticker_col`` and ``on=date``, the ``date`` column
+    # cycles per ticker (AAPL➡Dec, MSFT➡Jan); only the on-key needs global
+    # monotonicity, so we sort on-column-first. Empirically validated in
+    # ``/tmp/vesper_probe_merge_asof.py``.
     nlp = filings_clean[[release_column, ticker_col, feature_col]].sort_values(
-        [ticker_col, release_column]
+        [release_column, ticker_col]
     )
 
-    # Sort weekly data (merge_asof requires sorted left key per group).
+    # Sort weekly data (same rationale as above).
     weekly_long = weekly_clean[[date_col, ticker_col]].drop_duplicates().sort_values(
-        [ticker_col, date_col]
+        [date_col, ticker_col]
     )
 
     if weekly_long.empty:
@@ -368,24 +355,23 @@ def _weekly_nlp_features(
             {feature_col: pd.Series([], dtype=float, index=empty_idx)}
         )
 
-    merged_per_ticker: list[pd.DataFrame] = []
-    for ticker, group in weekly_long.groupby(ticker_col, sort=False):
-        sub_nlp = nlp[nlp[ticker_col] == ticker].sort_values(release_column)
-        if sub_nlp.empty:
-            group = group.copy()
-            group[feature_col] = np.nan
-            merged_per_ticker.append(group)
-            continue
-        out = pd.merge_asof(
-            group,
-            sub_nlp[[release_column, feature_col]],
-            left_on=date_col,
-            right_on=release_column,
-            direction="backward",
-        )
-        merged_per_ticker.append(out)
-
-    merged = pd.concat(merged_per_ticker, ignore_index=True)
+    # Single global backward-asof. ``by=ticker_col`` makes pandas partition the
+    # asof by ticker (exact-match key) without any explicit groupby + concat.
+    # Equivalent to the prior per-ticker loop on every test in
+    # ``tests/test_lookahead.py``; faster and C-path.
+    #
+    # NOTE: the right-frame MUST keep ``ticker_col`` — ``merge_asof(by=...)``
+    # requires the by-key to be present on both sides. Dropping it earlier
+    # was a silent-consistency regression; see ``tests/test_lookahead.py``.
+    merged = pd.merge_asof(
+        weekly_long,
+        nlp,
+        left_on=date_col,
+        right_on=release_column,
+        by=ticker_col,
+        direction="backward",
+        allow_exact_matches=True,
+    )
     out = (
         merged.set_index([date_col, ticker_col])[[feature_col]]
         .rename_axis([date_col, ticker_col])
@@ -403,6 +389,7 @@ def run_backtest(
     data_dir: str | Path = "data",
     *,
     external_filings: pd.DataFrame | None = None,
+    model_type: Literal["ridge", "xgboost"] = "ridge",
 ) -> BacktestResult:
     """Run the full research backtest against synthetic artefacts.
 
@@ -502,46 +489,46 @@ def run_backtest(
         ["date", "ticker"]
     )
 
-    # Per-ticker backward asof merge to attach direct shocks.
-    direct_frames: list[pd.DataFrame] = []
-    for ticker, sub_pair in weekly_pairs.groupby("ticker", sort=False):
-        sub_pair_sorted = sub_pair.sort_values("date").copy()
-        if feature_release.empty:
-            sub_pair_sorted["nlp_decay_score"] = np.nan
-            direct_frames.append(sub_pair_sorted)
-            continue
-        sub_nlp = (
-            feature_release.loc[feature_release["ticker"] == ticker]
-            .sort_values("release_date")
-        )
-        if sub_nlp.empty:
-            sub_pair_sorted["nlp_decay_score"] = np.nan
-            direct_frames.append(sub_pair_sorted)
-            continue
-        merged = pd.merge_asof(
-            sub_pair_sorted,
-            sub_nlp[["release_date", "nlp_decay_score"]],
-            left_on="date",
-            right_on="release_date",
-            direction="backward",
-        )
-        direct_frames.append(merged)
-
-    if direct_frames:
-        direct_df = (
-            pd.concat(direct_frames, ignore_index=True)
-            .set_index(["date", "ticker"])
-            .sort_index()
-        )
-    else:
+    # Single global backward-asof keyed by ticker (replaces the prior
+    # per-ticker groupby loop). ``merge_asof(by=...)`` partitions the asof
+    # by exact-match key without an explicit groupby.
+    if feature_release.empty or weekly_pairs.empty:
         empty_idx = pd.MultiIndex.from_arrays(
             [[], []], names=["date", "ticker"]
         )
         direct_df = pd.DataFrame(
             {"nlp_decay_score": pd.Series([], dtype=float, index=empty_idx)}
         )
+    else:
+        # ``merge_asof(by="ticker", on="date")`` requires the on-column
+        # (``date``) to be globally monotonic, not the by-column. Sort
+        # on-key first; ``ticker`` then partitions within each date.
+        # Note: ``merge_asof`` is happy with the by-column non-monotonic
+        # globally, but not with the on-column non-monotonic globally.
+        left = weekly_pairs.sort_values(["date", "ticker"])
+        right = feature_release.sort_values(["release_date", "ticker"])
+        # ``merge_asof(by="ticker")`` requires ``ticker`` on the right frame
+        # for the exact-match partition key. Slicing ``right`` to drop the
+        # column silently regresses to ``KeyError: 'ticker'``.
+        merged = pd.merge_asof(
+            left,
+            right,
+            left_on="date",
+            right_on="release_date",
+            by="ticker",
+            direction="backward",
+            allow_exact_matches=True,
+        )
+        direct_df = (
+            merged
+            .set_index(["date", "ticker"])
+            .sort_index()
+        )
 
     # Now propagate each week's direct shocks through the supply-chain graph.
+    # ``propagate`` is indexed by ticker; we lift the index to a column once
+    # and then iterate the columns as numpy arrays via ``zip`` — equivalent to
+    # the previous ``propagate.iterrows()`` row walk but vectorised.
     graph_shock_records: list[dict[str, object]] = []
     for week in weekly_dates:
         try:
@@ -551,15 +538,18 @@ def run_backtest(
         if week_block.empty:
             continue
         direct_series = week_block["nlp_decay_score"]
-        propagate = propagate_shock_scores(direct_series, graph)
-        for ticker, row in propagate.iterrows():
-            graph_shock_records.append(
-                {
-                    "date": week,
-                    "ticker": ticker,
-                    "graph_shock_score": float(row["graph_shock_score"]),
-                }
+        propagate = propagate_shock_scores(direct_series, graph).reset_index()
+        graph_shock_records.extend(
+            {
+                "date": week,
+                "ticker": ticker,
+                "graph_shock_score": float(score),
+            }
+            for ticker, score in zip(
+                propagate["ticker"].to_numpy(),
+                propagate["graph_shock_score"].to_numpy(),
             )
+        )
     if graph_shock_records:
         graph_shock_df = (
             pd.DataFrame(graph_shock_records)
@@ -605,8 +595,14 @@ def run_backtest(
     training = training.dropna(subset=["target"]).reset_index()
 
     # ----- 6. Purged-CV alpha model fit. -----
+    logger.info(
+        "Fitting %s alpha model on %d training rows",
+        model_type,
+        len(training),
+    )
     alpha_model = AlphaModel(
         feature_columns=("nlp_decay_score", "graph_shock_score"),
+        model_type=model_type,
         ridge_alpha=5.0,
         n_splits=4,
         gap_groups=1,
@@ -765,6 +761,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "the form 'Company Name AdminContact@<your-domain>'."
         ),
     )
+    parser.add_argument(
+        "--model-type",
+        type=str,
+        choices=("ridge", "xgboost"),
+        default="ridge",
+        help=(
+            "Alpha-model backend. 'ridge' (default) is StandardScaler + Ridge. "
+            "'xgboost' uses shallow trees (max_depth=2) with heavy L2 "
+            "regularisation (reg_lambda=10). Requires the optional xgboost>=2.0 "
+            "package; passing it without xgboost installed produces a clear "
+            "ImportError on startup."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -780,7 +789,11 @@ def main(argv: list[str] | None = None) -> int:
             cache_dir=Path(args.data_dir) / DEFAULT_REAL_EDGAR_CACHE,
         )
 
-    result = run_backtest(data_dir=args.data_dir, external_filings=external_filings)
+    result = run_backtest(
+        data_dir=args.data_dir,
+        external_filings=external_filings,
+        model_type=args.model_type,
+    )
     # Persist a small report next to the data artefacts.
     report_path = Path(args.data_dir) / "backtest_report.csv"
     report_path.parent.mkdir(parents=True, exist_ok=True)

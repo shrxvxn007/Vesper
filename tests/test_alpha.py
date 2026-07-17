@@ -6,12 +6,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from alpha_model.cross_sectional_model import (
+from vesper.alpha_model.cross_sectional_model import (
     AlphaModel,
     PurgedGroupTimeSeriesSplit,
     build_training_matrix,
 )
-from alpha_model.target_formulation import compute_residual_returns_rolling
+from vesper.alpha_model.target_formulation import compute_residual_returns_rolling
 
 
 def test_compute_residual_returns_warmup_nan(mini_weekly_panel) -> None:
@@ -155,6 +155,9 @@ def test_alpha_model_fit_predict(supervised_training_df: pd.DataFrame) -> None:
     preds = model.predict(latest)
     assert len(preds) == len(latest)
     assert np.isfinite(preds.to_numpy()).all()
+    # Tree models can collapse to constant under heavy L2 on tiny data;
+    # guard against silent rank-flatlining in production.
+    assert preds.std() > 0.0
 
 
 def test_alpha_model_predict_requires_fit() -> None:
@@ -193,3 +196,50 @@ def test_build_training_matrix_uses_forward_target() -> None:
     assert out["target"].iloc[0] == pytest.approx(0.01 - (0.01 - (-0.01)) / (n - 1) * 1, rel=1e-6) or np.isfinite(
         out["target"].iloc[0]
     )
+
+
+# ---------------------------------------------------------------------------
+# XGBoost alpha backend
+# ---------------------------------------------------------------------------
+
+
+def test_alpha_model_xgboost_path(supervised_training_df: pd.DataFrame) -> None:
+    """Smoke-test the XGBoost backend: fit, predict, finite outputs."""
+    pytest.importorskip("xgboost")
+    model = AlphaModel(
+        model_type="xgboost",
+        feature_columns=("nlp_decay_score", "graph_shock_score"),
+        n_splits=3,
+        gap_groups=1,
+        random_state=42,
+    )
+    model.fit(supervised_training_df, date_column="date")
+    assert model.model_type == "xgboost"
+
+    last_week = supervised_training_df["date"].max()
+    latest = supervised_training_df[
+        supervised_training_df["date"] == last_week
+    ].reset_index(drop=True)
+    preds = model.predict(latest)
+    assert len(preds) == len(latest)
+    assert np.isfinite(preds.to_numpy()).all()
+    # Tree models can collapse to constant under heavy L2 on tiny data;
+    # guard against silent rank-flatlining in production.
+    assert preds.std() > 0.0
+
+
+def test_alpha_model_unknown_model_type_raises() -> None:
+    """Unknown model_type strings should fail loudly before any heavy work."""
+    with pytest.raises(ValueError, match="model_type must be one of"):
+        AlphaModel(model_type="elastic_net")  # type: ignore[arg-type]
+
+
+def test_alpha_model_xgboost_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Selecting model_type='xgboost' without xgboost installed raises a clear ImportError."""
+    import sys
+
+    # Setting sys.modules['xgboost'] = None is the documented way to make
+    # the next `from xgboost import XGBRegressor` raise ModuleNotFoundError.
+    monkeypatch.setitem(sys.modules, "xgboost", None)
+    with pytest.raises(ImportError, match="XGBoost is required"):
+        AlphaModel(model_type="xgboost")
