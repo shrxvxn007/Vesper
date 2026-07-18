@@ -64,7 +64,7 @@ jobs:
         # — no external assets, no CDN dependencies.
         run: |
           mkdir -p docs
-          python main.py --data-dir data
+          python -m vesper.main --data-dir data
           for nb in notebooks/evaluation.ipynb notebooks/cap_binding_diagnostics.ipynb; do
             name=$(basename "$nb" .ipynb)
             echo "--- building $name ---"
