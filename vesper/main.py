@@ -266,6 +266,60 @@ def _weekly_incorporation(
     return merged[list(feature_cols)]
 
 
+def _week_shock_records(
+    week: pd.Timestamp,
+    propagate: pd.DataFrame,
+) -> list[dict[str, object]]:
+    """Build graph-shock records for one week, defensively discovering the
+    score column name.
+
+    ``propagate_shock_scores`` returns a DataFrame indexed by ticker
+    (whose ``index.name`` is conventionally ``"ticker"`` but the values
+    flow through regardless of that label) with the propagated score as
+    the *last* column by positional contract. Instead of hardcoding
+    ``propagate["graph_shock_score"]``, this helper reads the rightmost
+    column name dynamically so a benign upstream rename in
+    ``propagate_shock_scores`` (e.g., ``graph_shock_score`` ->
+    ``transmitted_risk``) no longer silently raises a ``KeyError`` here.
+
+    The output ``ticker`` key is always emitted under the literal name
+    ``"ticker"`` regardless of the propagator's index name — downstream
+    consumers expect the canonical key, and ``propagate.index.to_numpy()``
+    already surfaces the ticker strings without needing the label.
+
+    Args:
+        week: The week date (timestamp) for the records.
+        propagate: Output of :func:`vesper.features.shock_propagation
+            .propagate_shock_scores`; expected to be indexed by ticker
+            with the propagated score as the rightmost column.
+
+    Returns:
+        List of dicts, one per row of ``propagate``. Each dict carries
+        ``date``, ``ticker`` (sourced from the index values), and the
+        propagated-score column using the *discovered* name (last column).
+        The score key mirrors the column emitted by the propagator, so a
+        downstream ``pd.DataFrame`` round-trip picks up whatever name the
+        propagator produced.
+    """
+    # Ticker values are sourced via ``propagate.index.to_numpy()`` rather
+    # than a hypothetical ``propagate[ticker_name]`` access (which would
+    # require a ``reset_index()`` and would silently re-introduce a
+    # KeyError if upstream renames ``index.name``). The score column is
+    # discovered as ``columns[-1]`` by positional contract.
+    score_name = propagate.columns[-1]
+    return [
+        {
+            "date": week,
+            "ticker": str(ticker),
+            score_name: float(score),
+        }
+        for ticker, score in zip(
+            propagate.index.to_numpy(),
+            propagate[score_name].to_numpy(),
+        )
+    ]
+
+
 def _weekly_nlp_features(
     filings_df: pd.DataFrame,
     weekly_features_df: pd.DataFrame,
@@ -538,18 +592,13 @@ def run_backtest(
         if week_block.empty:
             continue
         direct_series = week_block["nlp_decay_score"]
-        propagate = propagate_shock_scores(direct_series, graph).reset_index()
-        graph_shock_records.extend(
-            {
-                "date": week,
-                "ticker": ticker,
-                "graph_shock_score": float(score),
-            }
-            for ticker, score in zip(
-                propagate["ticker"].to_numpy(),
-                propagate["graph_shock_score"].to_numpy(),
-            )
-        )
+        propagate = propagate_shock_scores(direct_series, graph)
+        # Defensive rename-discovery lives in ``_week_shock_records`` so a
+        # benign upstream rename in ``propagate_shock_scores`` (e.g.,
+        # ``ticker`` -> ``asset_id``, ``graph_shock_score`` ->
+        # ``transmitted_risk``) no longer silently raises a ``KeyError``
+        # here. See ``tests/test_main_step3_defensive.py``.
+        graph_shock_records.extend(_week_shock_records(week, propagate))
     if graph_shock_records:
         graph_shock_df = (
             pd.DataFrame(graph_shock_records)
