@@ -237,18 +237,18 @@ class SECScraper:
         """
         for cik in ciks:
             df = self.fetch_recent_filings(cik, form_types=form_types)
-        df_reset = df.reset_index()
-        for row in df_reset.itertuples():
-            yield FilingRecord(
-                cik=row.cik,
-                ticker=row.ticker,
-                form_type=row.form_type,
-                filing_date=row.filing_date,
-                period_end_date=row.period_end_date,
-                accession_number=row.accession_number,
-                primary_document=row.primary_document,
-                url=row.url,
-            )
+            df_reset = df.reset_index()
+            for row in df_reset.itertuples():
+                yield FilingRecord(
+                    cik=row.cik,
+                    ticker=row.ticker,
+                    form_type=row.form_type,
+                    filing_date=row.filing_date,
+                    period_end_date=row.period_end_date,
+                    accession_number=row.accession_number,
+                    primary_document=row.primary_document,
+                    url=row.url,
+                )
 
     # ------------------------------------------------------------------
     # Internal helpers
